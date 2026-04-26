@@ -157,13 +157,19 @@ def main() -> None:
         description="VTK marching-cube viewer: cubeIndex 0–255 (bit i = Vi inside); triCase from tricase.cxx.",
     )
     ap.add_argument(
+        "tricase_path",
+        nargs="?",
+        type=Path,
+        help="optional tricase file path (same as --tricase)",
+    )
+    ap.add_argument(
         "--tricase",
         type=Path,
-        default=default_cxx,
         help=f"path to tricase.cxx (default: {default_cxx})",
     )
     args = ap.parse_args()
-    cxx_path: Path = args.tricase.resolve()
+    selected_path = args.tricase if args.tricase is not None else args.tricase_path
+    cxx_path: Path = (selected_path if selected_path is not None else default_cxx).resolve()
     if not cxx_path.is_file():
         print(f"error: file not found: {cxx_path}", file=sys.stderr)
         sys.exit(1)
