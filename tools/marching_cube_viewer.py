@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VTK viewer: pick marching-cubes case 0–255; geometry from triCase rows in tricase.cxx."""
+"""VTK viewer: marching-cubes cases 0–255 (cubeIndex bitmask); triCase rows from tricase.cxx."""
 
 from __future__ import annotations
 
@@ -10,34 +10,68 @@ import sys
 import time
 from pathlib import Path
 
-# Paul Bourke / Lorensen–Cline vertex order (matches triCase edge indices in this course).
-# v0..v3 bottom face z=0; v4..v7 top z=1.
+# --- Cube layout (class convention): x = left→right, y = front→back, z = bottom→top ---
+# Bottom z=0: V0 front-left, V1 front-right, V2 back-left, V3 back-right.
+# Top z=1: V4..V7 above V0..V3 respectively.
+# Bit i of cubeIndex = 1 iff vertex Vi is inside the isosurface.
 _CORNER_POS: list[tuple[float, float, float]] = [
-    (0.0, 0.0, 0.0),
-    (1.0, 0.0, 0.0),
-    (1.0, 1.0, 0.0),
-    (0.0, 1.0, 0.0),
-    (0.0, 0.0, 1.0),
-    (1.0, 0.0, 1.0),
-    (1.0, 1.0, 1.0),
-    (0.0, 1.0, 1.0),
+    (0.0, 0.0, 0.0),  # V0 bottom-front-left
+    (1.0, 0.0, 0.0),  # V1 bottom-front-right
+    (0.0, 1.0, 0.0),  # V2 bottom-back-left
+    (1.0, 1.0, 0.0),  # V3 bottom-back-right
+    (0.0, 0.0, 1.0),  # V4 top-front-left
+    (1.0, 0.0, 1.0),  # V5 top-front-right
+    (0.0, 1.0, 1.0),  # V6 top-back-left
+    (1.0, 1.0, 1.0),  # V7 top-back-right
 ]
 
-# Edge i connects EDGE_VERT[i][0] -> EDGE_VERT[i][1]
+# Edge Ei connects vertices (see convention above).
 _EDGE_VERT: list[tuple[int, int]] = [
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 0),
-    (4, 5),
-    (5, 6),
-    (6, 7),
-    (7, 4),
-    (0, 4),
-    (1, 5),
-    (2, 6),
-    (3, 7),
+    (0, 1),  # E0 bottom front
+    (1, 3),  # E1 bottom right
+    (2, 3),  # E2 bottom back
+    (0, 2),  # E3 bottom left
+    (4, 5),  # E4 top front
+    (5, 7),  # E5 top right
+    (6, 7),  # E6 top back
+    (4, 6),  # E7 top left
+    (0, 4),  # E8 vertical at front-left
+    (1, 5),  # E9 vertical at front-right
+    (2, 6),  # E10 vertical at back-left
+    (3, 7),  # E11 vertical at back-right
 ]
+
+_CUBE_CENTER: tuple[float, float, float] = (0.5, 0.5, 0.5)
+
+
+def _unit_radial_from_center(p: tuple[float, float, float]) -> tuple[float, float, float]:
+    cx, cy, cz = _CUBE_CENTER
+    vx, vy, vz = p[0] - cx, p[1] - cy, p[2] - cz
+    n = (vx * vx + vy * vy + vz * vz) ** 0.5
+    if n < 1e-9:
+        return (1.0, 0.0, 0.0)
+    return (vx / n, vy / n, vz / n)
+
+
+def vertex_label_world(vertex_idx: int, outward: float) -> tuple[float, float, float]:
+    """World position for a vertex label (offset slightly outside the unit cube)."""
+    px, py, pz = _CORNER_POS[vertex_idx]
+    ux, uy, uz = _unit_radial_from_center((px, py, pz))
+    return (px + outward * ux, py + outward * uy, pz + outward * uz)
+
+
+def edge_midpoint_world(edge_idx: int) -> tuple[float, float, float]:
+    a, b = _EDGE_VERT[edge_idx]
+    pa, pb = _CORNER_POS[a], _CORNER_POS[b]
+    return (0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1]), 0.5 * (pa[2] + pb[2]))
+
+
+def edge_label_world(edge_idx: int, outward: float) -> tuple[float, float, float]:
+    """World position for an edge label (midpoint, nudged outward from cube center)."""
+    mx, my, mz = edge_midpoint_world(edge_idx)
+    ux, uy, uz = _unit_radial_from_center((mx, my, mz))
+    return (mx + outward * ux, my + outward * uy, mz + outward * uz)
+
 
 _ROW_RE = re.compile(
     r"^\s*\{([^}]*)\}\s*,?\s*/\*\s*(\d+)\b(?:\s+[^*]*)?\*/",
@@ -46,7 +80,7 @@ _ROW_RE = re.compile(
 
 
 def parse_tricase(text: str) -> list[tuple[int, ...]]:
-    """Parse static int triCase[256][16] body (same row pattern as merge_tricase.py)."""
+    """Parse static int triCase[256][16]; row /* i */ = cubeIndex i, edges E0–E11 (class convention)."""
     rows: dict[int, tuple[int, ...]] = {}
     for m in _ROW_RE.finditer(text):
         case = int(m.group(2))
@@ -77,6 +111,13 @@ def _edge_surface_point(
         pa[1] + u * (pb[1] - pa[1]),
         pa[2] + u * (pb[2] - pa[2]),
     )
+
+
+def format_tricase_row_sidebar(cube_index: int, row: tuple[int, ...]) -> str:
+    """Side panel: cubeIndex and row as in tricase.cxx (E0–E11)."""
+    lo = ", ".join(str(x) for x in row[:8])
+    hi = ", ".join(str(x) for x in row[8:])
+    return f"cubeIndex {cube_index}\n{{\n  {lo},\n  {hi}\n}}"
 
 
 def _triangles_from_row(row: tuple[int, ...]) -> list[tuple[int, int, int]]:
@@ -112,7 +153,9 @@ def main() -> None:
     repo = Path(__file__).resolve().parent.parent
     default_cxx = repo / "tricase.cxx"
 
-    ap = argparse.ArgumentParser(description="VTK marching-cube case viewer (reads triCase from tricase.cxx).")
+    ap = argparse.ArgumentParser(
+        description="VTK marching-cube viewer: cubeIndex 0–255 (bit i = Vi inside); triCase from tricase.cxx.",
+    )
     ap.add_argument(
         "--tricase",
         type=Path,
@@ -149,11 +192,14 @@ def main() -> None:
         from vtkmodules.vtkRenderingAnnotation import vtkCornerAnnotation
         from vtkmodules.vtkRenderingCore import (
             vtkActor,
+            vtkFollower,
             vtkPolyDataMapper,
             vtkRenderWindow,
             vtkRenderWindowInteractor,
             vtkRenderer,
+            vtkTextActor,
         )
+        from vtkmodules.vtkRenderingFreeType import vtkVectorText
         # Required when importing vtk piecemeal: registers the real OpenGL/Cocoa window
         # so vtkRenderWindowInteractor::Start() actually runs the GUI event loop.
         import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
@@ -234,6 +280,38 @@ def main() -> None:
     renderer.AddActor(corner_actor)
     renderer.AddActor(mesh_actor)
 
+    # Convention labels on the cube: v0..v7 at corners, e0..e11 at edge midpoints (camera-facing).
+    def _make_follower_label(
+        text: str,
+        xyz: tuple[float, float, float],
+        rgb: tuple[float, float, float],
+        scale: float,
+    ) -> vtkFollower:
+        vt = vtkVectorText()
+        vt.SetText(text)
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputConnection(vt.GetOutputPort())
+        fol = vtkFollower()
+        fol.SetMapper(mapper)
+        fol.SetCamera(renderer.GetActiveCamera())
+        fol.SetPosition(xyz[0], xyz[1], xyz[2])
+        fol.GetProperty().SetColor(rgb[0], rgb[1], rgb[2])
+        fol.SetScale(scale)
+        # Vector text followers report huge bounds; that breaks automatic clipping / framing.
+        fol.UseBoundsOff()
+        return fol
+
+    _v_rgb = (0.06, 0.18, 0.62)
+    _e_rgb = (0.62, 0.32, 0.05)
+    _v_scale = 0.038
+    _e_scale = 0.026
+    _v_out = 0.11
+    _e_out = 0.062
+    for vi in range(8):
+        renderer.AddActor(_make_follower_label(f"v{vi}", vertex_label_world(vi, _v_out), _v_rgb, _v_scale))
+    for ei in range(12):
+        renderer.AddActor(_make_follower_label(f"e{ei}", edge_label_world(ei, _e_out), _e_rgb, _e_scale))
+
     ren_win = vtkRenderWindow()
     ren_win.AddRenderer(renderer)
     ren_win.SetWindowName("Marching cube case viewer")
@@ -257,6 +335,20 @@ def main() -> None:
     ann.SetText(0, "")  # lower left
     renderer.AddViewProp(ann)
 
+    # Right side: full triCase[case] row (matches tricase.cxx values)
+    side_text = vtkTextActor()
+    side_text.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+    side_text.SetPosition(0.58, 0.92)
+    tp = side_text.GetTextProperty()
+    tp.SetColor(0.05, 0.05, 0.08)
+    tp.SetFontFamilyToCourier()
+    tp.SetFontSize(13)
+    tp.SetJustificationToLeft()
+    tp.SetVerticalJustificationToTop()
+    tp.SetLineSpacing(1.15)
+    tp.BoldOff()
+    renderer.AddActor2D(side_text)
+
     state: dict = {
         "case": 1,
         "tri_case": tri_case,
@@ -269,6 +361,7 @@ def main() -> None:
         "corner_mapper": corner_mapper,
         "mesh_mapper": mesh_mapper,
         "ann": ann,
+        "side_text": side_text,
         "ren_win": ren_win,
     }
 
@@ -277,18 +370,16 @@ def main() -> None:
         case_index = state["case"]
         buf = state.get("type_case_buffer", "")
         bits = format(case_index, "08b")
-        row = tri_case[case_index]
-        row_preview = ", ".join(str(x) for x in row[:16])
         if buf:
             typing = f"\nType case → [{buf}]   Enter=apply  Esc=cancel  BackSpace"
         else:
             typing = "\nType digits 0–255, then Enter to jump to a case."
         ann.SetText(
             0,
-            f"{cxx_path.name}  |  case {case_index}  (0b{bits})\n"
-            f"row: {row_preview}{typing}\n"
+            f"{cxx_path.name}  |  cubeIndex {case_index}  (0b{bits}){typing}\n"
             "Keys: n/p step  Home/End 0/255  space play/pause  q quit",
         )
+        side_text.SetInput(format_tricase_row_sidebar(case_index, tri_case[case_index]))
 
     def sync_slider(case_index: int) -> None:
         rep = vtkSliderRepresentation2D.SafeDownCast(slider_widget.GetRepresentation())
@@ -350,7 +441,9 @@ def main() -> None:
         rep = vtkSliderRepresentation2D.SafeDownCast(widget.GetRepresentation())
         if rep is None:
             return
-        apply_case(int(rep.GetValue()))
+        # VTK uses floats; int() truncates (e.g. 3.99 → 3). Round so the knob at "4" is case 4.
+        v = float(rep.GetValue())
+        apply_case(max(0, min(255, int(round(v)))))
         sync_slider(state["case"])
 
     def on_timer(_obj, _event) -> None:
@@ -456,7 +549,7 @@ def main() -> None:
     slider_rep.SetMinimumValue(0.0)
     slider_rep.SetMaximumValue(255.0)
     slider_rep.SetValue(1.0)
-    slider_rep.SetTitleText("case")
+    slider_rep.SetTitleText("cubeIndex")
     slider_rep.GetPoint1Coordinate().SetCoordinateSystemToNormalizedDisplay()
     slider_rep.GetPoint1Coordinate().SetValue(0.02, 0.12)
     slider_rep.GetPoint2Coordinate().SetCoordinateSystemToNormalizedDisplay()
@@ -489,6 +582,21 @@ def main() -> None:
         sys.exit(1)
 
     apply_case(1)
+
+    # Orbit around cube center. vtkFollower label bounds are often huge; if we call
+    # ResetCameraClippingRange() with no args, near/far planes clip away the whole unit cube.
+    def init_camera_on_cube_center() -> None:
+        cam = renderer.GetActiveCamera()
+        cx, cy, cz = _CUBE_CENTER
+        cam.SetFocalPoint(cx, cy, cz)
+        # Fixed view from +X,+Y,+Z (outside the cube, looking toward center).
+        cam.SetPosition(cx + 2.0, cy + 2.25, cz + 1.85)
+        cam.SetViewUp(0.0, 0.0, 1.0)
+        cam.SetViewAngle(38.0)
+        # Clipping range derived only from [0,1]³ — ignores follower text bounds.
+        renderer.ResetCameraClippingRange(0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+
+    init_camera_on_cube_center()
     ren_win.Render()
     interactor.ProcessEvents()
     if hasattr(ren_win, "WaitForCompletion"):
